@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>去中心化众筹平台 - 用户端</title>
+    <!-- <script src="https://cdn.ethers.io/5.7.2/ethers.umd.min.js"></script> -->
+    <script src="libs/ethers.umd.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; background-color: #f4f4f4; color: #333; }
+        h1, h2 { color: #0056b3; border-bottom: 2px solid #eee; padding-bottom: 10px; margin-top: 30px; }
+        .container { max-width: 900px; margin: 20px auto; padding: 25px; border: 1px solid #ddd; border-radius: 10px; background-color: #fff; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .info-box, .section { background-color: #e9f5ff; padding: 15px; margin-bottom: 20px; border-radius: 8px; border: 1px solid #cce7ff; }
+        .info-box p { margin: 5px 0; }
+        input[type="text"], input[type="number"] { width: calc(100% - 22px); padding: 10px; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; }
+        button { padding: 10px 20px; background-color: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 1em; margin-right: 10px; }
+        button:hover:not(:disabled) { background-color: #0056b3; }
+        button:disabled { background-color: #cccccc; cursor: not-allowed; }
+        .status-message { margin-top: 10px; padding: 8px; border-radius: 5px; }
+        .error { color: #d8000c; background-color: #ffbaba; border: 1px solid #d8000c; }
+        .success { color: #4f8a10; background-color: #dff2bf; border: 1px solid #4f8a10; }
+        .project-item, .my-project-item { border: 1px solid #eee; padding: 15px; margin-bottom: 10px; border-radius: 5px; background-color: #fefefe; }
+        .project-item strong, .my-project-item strong { color: #007bff; }
+        .project-item p, .my-project-item p { margin: 5px 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>去中心化众筹平台 - 用户端</h1>
+
+        <div class="info-box">
+            <h2>钱包连接状态</h2>
+            <p>连接状态: <span id="connectionStatus">未连接</span></p>
+            <p>当前账户: <span id="currentAccount">未获取</span></p>
+            <p>管理员地址: <span id="adminAddress">未获取</span></p>
+            <p>工厂合约地址: <span id="factoryAddress">未获取</span></p>
+            <p>提案管理器地址: <span id="proposalManagerAddress">未获取</span></p>
+            <p>水龙头合约地址: <span id="faucetAddress">未获取</span></p>
+        </div>
+
+        <div class="section">
+            <h2>通过水龙头获取测试 ETH</h2>
+            <button id="requestFundsBtn">从水龙头获取 1 ETH</button>
+            <p id="faucetStatus" class="status-message"></p>
+        </div>
+
+        <div class="section">
+            <h2>提交众筹提案</h2>
+            <div class="create-proposal-form">
+                <label for="proposalInitiator">项目发起人地址 (当前连接账户):</label>
+                <input type="text" id="proposalInitiator" disabled><br>
+                <label for="proposalName">提案名称:</label>
+                <input type="text" id="proposalName" value="创新科技基金"><br>
+                <label for="proposalGoal">目标金额 (ETH):</label>
+                <input type="number" id="proposalGoal" value="50" step="0.1"><br>
+                <label for="proposalDeadline">截止日期时间:</label>
+                <input type="datetime-local" id="proposalDeadline"><br>
+                <label for="offchainDataHash">链下数据哈希 (例如 IPFS Hash):</label>
+                <input type="text" id="offchainDataHash" value="QmYqC...myhash"><br>
+                <button id="submitProposalBtn">提交项目提案</button>
+                <p id="submitProposalStatus" class="status-message"></p>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>已部署的众筹项目 (可捐款)</h2>
+            <button id="refreshProjects">刷新项目列表</button>
+            <div id="projectList">
+                <p>加载中...</p>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>我的众筹项目 (发起人/捐款人管理)</h2>
+            <p>此区域将显示您作为发起人或捐款人参与的项目。您可以查看项目状态、结束众筹、请求退款或提取资金。</p>
+            <button id="refreshMyProjects">刷新我的项目</button>
+            <div id="myProjectList">
+                <p>加载中...</p>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        let provider; // Ethers provider
+        let signer;   // Ethers signer (connected account)
+        let factoryContract;
+        let proposalManagerContract;
+        let faucetContract;
+        let adminAddressFromContract; // 从合约读取的管理员地址
+        let deployedAddresses; // 存储从文件加载的部署地址
+
+        const gethRpcUrl = "http://127.0.0.1:8888"; // Geth 节点 RPC URL
+
+        // --- 合约 ABI 定义 ---
+        const factoryAbi = [
+            "function adminAddress() view returns (address)",
+            "function getDeployedProjects() view returns (address[])",
+            "function getProjectsByInitiator(address initiator) view returns (address[])",
+            "function createProject(address _actualInitiator, uint256 _goal, uint256 _duration, string calldata _name) returns (address)",
+            "event ProjectCreated(uint256 indexed projectId, address indexed initiator, address projectAddress, uint256 goal, uint256 duration, string name)"
+        ];
+
+        const proposalManagerAbi = [
+            "function submitProposal(uint256 _goal, uint256 _deadline, string calldata _offchainDataHash, string calldata _name)",
+            "function approveProposal(uint256 _proposalId)",
+            "function rejectProposal(uint256 _proposalId)",
+            "function getProposalsCount() view returns (uint256)",
+            "function getProposal(uint256 _proposalId) view returns (uint256 goal, uint256 duration, address initiator, string offchainDataHash, string name, uint8 status, address deployedProject)",
+            "event ProposalSubmitted(uint256 proposalId, address indexed applicant, uint256 goal, uint256 duration, string offchainDataHash, string name)",
+            "event ProposalStatusUpdated(uint256 indexed proposalId, uint8 newStatus, address indexed approver)"
+        ];
+
+        const projectAbi = [
+            "function name() view returns (string)",
+            "function initiator() view returns (address)",
+            "function goalAmount() view returns (uint256)",
+            "function deadline() view returns (uint256)",
+            "function raisedAmount() view returns (uint256)",
+            "function isEnded() view returns (bool)",
+            "function isSuccessful() view returns (bool)",
+            "function donors(address) view returns (uint256)",
+            "function adminAddress() view returns (address)",
+            "function endFunding()",
+            "function withdrawRefund()",
+            "function transferToInitiator()",
+            // "receive() external payable" // 接收 ETH 的 fallback/receive 函数
+        ];
+
+        const faucetAbi = [
+            "function requestTokens()",
+            "function amountAllowed() view returns (uint256)",
+            "function lockTime() view returns (uint256)",
+            "function lastRequest(address) view returns (uint256)"
+        ];
+
+        // --- 辅助函数 --- 
+        async function loadDeployedAddresses() {
+            try {
+                const response = await fetch('../deployments/addresses.json');
+                if (!response.ok) {
+                    throw new Error(`无法加载部署地址文件: ${response.statusText}`);
+                }
+                deployedAddresses = await response.json();
+                console.log("已加载部署地址:", deployedAddresses);
+
+                document.getElementById('factoryAddress').textContent = deployedAddresses.factory;
+                document.getElementById('proposalManagerAddress').textContent = deployedAddresses.proposalManager;
+                document.getElementById('faucetAddress').textContent = deployedAddresses.faucet;
+
+            } catch (error) {
+                console.error("加载部署地址失败:", error);
+                document.getElementById('connectionStatus').textContent = `错误: 无法加载合约地址。请检查后端部署。`;
+                throw error; // 抛出错误以停止后续操作
+            }
+        }
+
+        // --- 核心连接逻辑 --- 
+        async function connectWallet() {
+            try {
+                document.getElementById('connectionStatus').textContent = '尝试连接钱包...';
+                document.getElementById('currentAccount').textContent = '加载中...';
+                
+                if (!deployedAddresses) {
+                    await loadDeployedAddresses();
+                }
+
+                // 检查合约地址是否存在
+                if (!deployedAddresses.factory || !deployedAddresses.proposalManager || !deployedAddresses.faucet) {
+                    throw new Error("部署地址文件缺少必要的合约地址。请确保所有合约已部署。");
+                }
+
+                // 尝试连接 MetaMask 或其他注入的 Web3 提供程序
+                if (window.ethereum) {
+                    provider = new ethers.providers.Web3Provider(window.ethereum); // 使用 Web3Provider
+                    // 请求账户访问
+                    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+                    signer = provider.getSigner(); // 获取当前连接的账户作为 signer
+                    const currentAccountAddress = await signer.getAddress();
+                    document.getElementById('currentAccount').textContent = currentAccountAddress;
+                    document.getElementById('proposalInitiator').value = currentAccountAddress; // 填充申请人地址
+                    document.getElementById('connectionStatus').textContent = '已连接 MetaMask';
+                    console.log("已连接到账户:", currentAccountAddress);
+
+                    // 监听账户和网络切换
+                    window.ethereum.on('accountsChanged', (newAccounts) => {
+                        console.log("账户已切换:", newAccounts[0]);
+                        window.location.reload(); // 简单粗暴地重新加载页面以刷新状态
+                    });
+                    window.ethereum.on('chainChanged', (chainId) => {
+                        console.log("网络已切换，Chain ID:", chainId);
+                        window.location.reload(); // 简单粗暴地重新加载页面以刷新状态
+                    });
+
+                } else {
+                    // 如果没有 MetaMask，则回退到 Geth RPC 连接 (仅限读操作)
+                    provider = new ethers.providers.JsonRpcProvider(gethRpcUrl);
+                    document.getElementById('connectionStatus').textContent = '已连接到 Geth 节点 (无 MetaMask，仅限读)';
+                    document.getElementById('currentAccount').textContent = '无签名账户';
+                    document.getElementById('proposalInitiator').value = '无账户';
+                    console.warn("未检测到 MetaMask。某些操作可能受限。");
+                    // 禁用需要签名的按钮
+                    document.getElementById('submitProposalBtn').disabled = true;
+                    document.getElementById('requestFundsBtn').disabled = true;
+                    // 捐款按钮会在 refreshProjectList 中处理
+                }
+                
+                // 初始化合约实例 (signer 或 provider 优先)
+                factoryContract = new ethers.Contract(deployedAddresses.factory, factoryAbi, signer || provider);
+                proposalManagerContract = new ethers.Contract(deployedAddresses.proposalManager, proposalManagerAbi, signer || provider);
+                faucetContract = new ethers.Contract(deployedAddresses.faucet, faucetAbi, signer || provider);
+
+                adminAddressFromContract = await factoryContract.adminAddress();
+                document.getElementById('adminAddress').textContent = adminAddressFromContract;
+
+                // 初始刷新数据
+                refreshProjectList();
+                refreshMyProjects();
+
+            } catch (error) {
+                console.error("连接到区块链失败:", error);
+                document.getElementById('connectionStatus').textContent = `连接失败: ${error.message}`;
+                document.getElementById('currentAccount').textContent = '连接失败';
+            }
+        }
+
+        // --- 水龙头功能 --- 
+        async function requestFundsFromFaucet() {
+            const statusElem = document.getElementById('faucetStatus');
+            statusElem.textContent = '正在从水龙头获取资金...';
+            statusElem.className = '';
+
+            try {
+                if (!signer) {
+                    statusElem.textContent = '错误: 未连接到具有签名能力的账户。';
+                    statusElem.className = 'error';
+                    return;
+                }
+                const tx = await faucetContract.connect(signer).requestTokens();
+                await tx.wait();
+
+                statusElem.textContent = `成功从水龙头获取资金！交易哈希: ${tx.hash}`;
+                statusElem.className = 'success';
+                // 建议：获取资金后刷新一下账户余额显示 (需要更高级的ethers.js余额查询)
+                // provider.getBalance(await signer.getAddress()).then(balance => { /* update UI */ });
+
+            } catch (error) {
+                console.error("从水龙头获取资金失败:", error);
+                statusElem.textContent = `获取资金失败: ${error.message}`;
+                statusElem.className = 'error';
+            }
+        }
+
+        // --- 提交提案功能 --- 
+        async function submitProjectProposal() {
+            const statusElem = document.getElementById('submitProposalStatus');
+            statusElem.textContent = '正在提交提案...';
+            statusElem.className = '';
+
+            try {
+                if (!signer) {
+                    statusElem.textContent = '错误: 未连接到具有签名能力的账户。';
+                    statusElem.className = 'error';
+                    return;
+                }
+
+                const proposalGoal = ethers.utils.parseEther(document.getElementById('proposalGoal').value);
+                const proposalDeadlineStr = document.getElementById('proposalDeadline').value;
+                if (!proposalDeadlineStr) {
+                    statusElem.textContent = '错误: 截止日期时间不能为空。';
+                    statusElem.className = 'error';
+                    return;
+                }
+                const proposalDeadline = Math.floor(new Date(proposalDeadlineStr).getTime() / 1000); // 转为秒
+                const proposalName = document.getElementById('proposalName').value;
+                const offchainDataHash = document.getElementById('offchainDataHash').value;
+
+                if (!proposalName || !offchainDataHash) {
+                    statusElem.textContent = '错误: 项目名称和链下数据哈希不能为空。';
+                    statusElem.className = 'error';
+                    return;
+                }
+
+                const tx = await proposalManagerContract.connect(signer).submitProposal(
+                    proposalGoal,
+                    proposalDeadline,
+                    offchainDataHash,
+                    proposalName
+                );
+                const receipt = await tx.wait();
+
+                const event = receipt.logs?.find(log => {
+                    try {
+                        return proposalManagerContract.interface.parseLog(log).name === "ProposalSubmitted";
+                    } catch (e) {
+                        return false;
+                    }
+                });
+
+                if (event) {
+                    const parsedEvent = proposalManagerContract.interface.parseLog(event);
+                    const proposalId = parsedEvent.args.proposalId;
+                    statusElem.textContent = `提案提交成功！提案ID: ${proposalId} 交易哈希: ${tx.hash}。等待管理员审批。`;
+                    statusElem.className = 'success';
+                } else {
+                    statusElem.textContent = '提案提交交易成功，但未找到 ProposalSubmitted 事件。请检查合约。';
+                    statusElem.className = 'error';
+                }
+
+            } catch (error) {
+                console.error("提交提案失败:", error);
+                statusElem.textContent = `提交提案失败: ${error.message}`;
+                statusElem.className = 'error';
+            }
+        }
+
+        // --- 项目列表和捐款功能 --- 
+        async function refreshProjectList() {
+            const projectListDiv = document.getElementById('projectList');
+            projectListDiv.innerHTML = '<p>加载中...</p>';
+
+            try {
+                if (!factoryContract) {
+                    projectListDiv.innerHTML = '<p class="error">工厂合约未加载。请先连接钱包并确保合约已部署。</p>';
+                    return;
+                }
+                console.log("[调试] 工厂合约地址:", factoryContract.address);
+                console.log("[调试] 工厂ABI:", factoryContract.interface.fragments.map(f => f.name));
+                const deployedProjects = await factoryContract.getDeployedProjects();
+                console.log("[调试] 已部署项目地址列表:", deployedProjects);
+                if (deployedProjects.length === 0) {
+                    projectListDiv.innerHTML = '<p>暂无已部署的众筹项目。</p>';
+                    return;
+                }
+
+                projectListDiv.innerHTML = '';
+                for (const projectAddr of deployedProjects) {
+                    try {
+                        const project = new ethers.Contract(projectAddr, projectAbi, provider);
+                        const name = await project.name();
+                        const initiator = await project.initiator();
+                        const goal = ethers.utils.formatEther(await project.goalAmount());
+                        const raisedAmount = ethers.utils.formatEther(await project.raisedAmount());
+                        const endTime = new Date(Number(await project.deadline()) * 1000).toLocaleString();
+                        const isEnded = await project.isEnded();
+                        const isSuccessful = await project.isSuccessful();
+                        console.log(`[调试] 项目: ${name}, 地址: ${projectAddr}, 发起人: ${initiator}, 目标: ${goal}, 已筹: ${raisedAmount}, 结束时间: ${endTime}, 已结束: ${isEnded}, 是否成功: ${isSuccessful}`);
+                        const projectDiv = document.createElement('div');
+                        projectDiv.className = 'project-item';
+                        projectDiv.innerHTML = `
+                            <h3>${name}</h3>
+                            <p><strong>合约地址:</strong> ${projectAddr}</p>
+                            <p><strong>发起人:</strong> ${initiator}</p>
+                            <p><strong>目标金额:</strong> ${goal} ETH</p>
+                            <p><strong>已筹金额:</strong> ${raisedAmount} ETH</p>
+                            <p><strong>结束时间:</strong> ${endTime}</p>
+                            <p><strong>已结束:</strong> ${isEnded ? '是' : '否'}</p>
+                            <p><strong>是否成功:</strong> ${isSuccessful ? '是' : '否'}</p>
+                            <div style="margin-top: 10px;">
+                                <input type="number" id="donateAmount-${projectAddr}" value="1" step="0.01" placeholder="捐款金额 (ETH)" style="width: 150px; margin-right: 5px;">
+                                <button onclick="donateToProject('${projectAddr}')" ${isEnded ? 'disabled' : ''}>${isEnded ? '已结束' : '捐款'}</button>
+                                <p id="donateStatus-${projectAddr}" class="status-message"></p>
+                            </div>
+                        `;
+                        projectListDiv.appendChild(projectDiv);
+                    } catch (projectError) {
+                        console.error("[调试] 加载单个项目失败:", projectAddr, projectError);
+                    }
+                }
+            } catch (error) {
+                console.error("刷新项目列表失败:", error);
+                if (error && typeof error === 'object') {
+                    for (const key in error) {
+                        if (Object.prototype.hasOwnProperty.call(error, key)) {
+                            console.error(`[调试] error.${key}:`, error[key]);
+                        }
+                    }
+                }
+                projectListDiv.innerHTML = `<p class="error">加载项目失败: ${error.message}</p>`;
+            }
+        }
+
+        async function donateToProject(projectAddress) {
+            const statusElem = document.getElementById(`donateStatus-${projectAddress}`);
+            statusElem.textContent = '正在发送捐款...';
+            statusElem.className = '';
+
+            try {
+                if (!signer) {
+                    statusElem.textContent = '错误: 未连接到具有签名能力的账户。';
+                    statusElem.className = 'error';
+                    return;
+                }
+
+                const donateAmountInput = document.getElementById(`donateAmount-${projectAddress}`);
+                const donationAmount = ethers.utils.parseEther(donateAmountInput.value || "0");
+
+                if (donationAmount.isZero()) {
+                    statusElem.textContent = "请输入有效的捐款金额。";
+                    statusElem.className = 'error';
+                    return;
+                }
+
+                //直接发送 ETH 到项目合约
+                const tx = await signer.sendTransaction({
+                    to: projectAddress,
+                    value: donationAmount,
+                });
+                await tx.wait();
+
+                statusElem.textContent = `捐款成功！已捐 ${ethers.utils.formatEther(donationAmount)} ETH。交易哈希: ${tx.hash}`;
+                statusElem.className = 'success';
+                refreshProjectList(); // 刷新项目列表以更新已筹金额
+
+            } catch (error) {
+                console.error("捐款失败:", error);
+                statusElem.textContent = `捐款失败: ${error.message}`;
+                statusElem.className = 'error';
+            }
+        }
+
+        // --- 我的项目功能 (发起人/捐款人管理) ---
+        async function refreshMyProjects() {
+            const myProjectListDiv = document.getElementById('myProjectList');
+            myProjectListDiv.innerHTML = '<p>加载中...</p>';
+
+            try {
+                if (!signer) {
+                    myProjectListDiv.innerHTML = '<p class="error">请连接钱包以查看您的项目。</p>';
+                    return;
+                }
+
+                const currentAccountAddress = await signer.getAddress();
+                const projectsByInitiator = await factoryContract.getProjectsByInitiator(currentAccountAddress); // 获取我发起的项目
+                // 还需要遍历所有已部署项目，检查我是否是捐款人
+                const allDeployedProjects = await factoryContract.getDeployedProjects();
+
+                let myProjects = [];
+
+                // 查找我发起的项目
+                for (const projectAddr of projectsByInitiator) {
+                    const project = new ethers.Contract(projectAddr, projectAbi, provider);
+                    myProjects.push({ type: 'initiated', contract: project });
+                }
+
+                // 查找我捐款的项目
+                for (const projectAddr of allDeployedProjects) {
+                    const project = new ethers.Contract(projectAddr, projectAbi, provider);
+                    const donationAmount = await project.donors(currentAccountAddress);
+                    if (donationAmount > 0 && !projectsByInitiator.includes(projectAddr)) { // 排除我已经列为发起人的项目
+                        myProjects.push({ type: 'donated', contract: project, donationAmount: donationAmount });
+                    }
+                }
+
+                if (myProjects.length === 0) {
+                    myProjectListDiv.innerHTML = '<p>您尚未发起或捐款任何众筹项目。</p>';
+                    return;
+                }
+
+                myProjectListDiv.innerHTML = '';
+                for (const item of myProjects) {
+                    const project = item.contract;
+                    const name = await project.name();
+                    const initiator = await project.initiator();
+                    const goal = ethers.utils.formatEther(await project.goalAmount());
+                    const raisedAmount = ethers.utils.formatEther(await project.raisedAmount());
+                    const endTime = new Date(Number(await project.deadline()) * 1000).toLocaleString();
+                    const isEnded = await project.isEnded();
+                    const isSuccessful = await project.isSuccessful();
+                    const myDonation = item.type === 'donated' ? ethers.utils.formatEther(item.donationAmount) : 'N/A';
+
+                    const projectDiv = document.createElement('div');
+                    projectDiv.className = 'my-project-item';
+                    projectDiv.innerHTML = `
+                        <h3>${name} (${item.type === 'initiated' ? '我发起的' : '我捐款的'})</h3>
+                        <p><strong>合约地址:</strong> ${project.address}</p>
+                        <p><strong>发起人:</strong> ${initiator}</p>
+                        <p><strong>目标金额:</strong> ${goal} ETH</p>
+                        <p><strong>已筹金额:</strong> ${raisedAmount} ETH</p>
+                        <p><strong>结束时间:</strong> ${endTime}</p>
+                        <p><strong>已结束:</strong> ${isEnded ? '是' : '否'}</p>
+                        <p><strong>是否成功:</strong> ${isSuccessful ? '是' : '否'}</p>
+                        ${item.type === 'donated' ? `<p><strong>我的捐款:</strong> ${myDonation} ETH</p>` : ''}
+                        <div style="margin-top: 10px;">
+                            ${item.type === 'initiated' && isEnded && isSuccessful ? `<button onclick="transferFunds('${project.address}')">提取资金</button>` : ''}
+                            ${item.type === 'donated' && isEnded && !isSuccessful && item.donationAmount > 0 ? `<button onclick="withdrawRefund('${project.address}')">提取退款</button>` : ''}
+                            ${item.type === 'initiated' && !isEnded ? `<button onclick="endFunding('${project.address}')">结束众筹</button>` : ''}
+                            <p id="myProjectStatus-${project.address}" class="status-message"></p>
+                        </div>
+                    `;
+                    myProjectListDiv.appendChild(projectDiv);
+                }
+
+            } catch (error) {
+                console.error("刷新我的项目列表失败:", error);
+                myProjectListDiv.innerHTML = `<p class="error">加载我的项目失败: ${error.message}</p>`;
+            }
+        }
+
+        async function endFunding(projectAddress) {
+            const statusElem = document.getElementById(`myProjectStatus-${projectAddress}`);
+            statusElem.textContent = '正在结束众筹...';
+            statusElem.className = '';
+            try {
+                const projectContract = new ethers.Contract(projectAddress, projectAbi, signer);
+                const tx = await projectContract.connect(signer).endFunding();
+                await tx.wait();
+                statusElem.textContent = '众筹已成功结束！';
+                statusElem.className = 'success';
+                refreshMyProjects();
+                refreshProjectList();
+            } catch (error) {
+                console.error("结束众筹失败:", error);
+                statusElem.textContent = `结束众筹失败: ${error.message}`;
+                statusElem.className = 'error';
+            }
+        }
+
+        async function transferFunds(projectAddress) {
+            const statusElem = document.getElementById(`myProjectStatus-${projectAddress}`);
+            statusElem.textContent = '正在提取资金...';
+            statusElem.className = '';
+            try {
+                const projectContract = new ethers.Contract(projectAddress, projectAbi, signer);
+                const tx = await projectContract.connect(signer).transferToInitiator();
+                await tx.wait();
+                statusElem.textContent = '资金已成功提取！';
+                statusElem.className = 'success';
+                refreshMyProjects();
+                refreshProjectList();
+            } catch (error) {
+                console.error("提取资金失败:", error);
+                statusElem.textContent = `提取资金失败: ${error.message}`;
+                statusElem.className = 'error';
+            }
+        }
+
+        async function withdrawRefund(projectAddress) {
+            const statusElem = document.getElementById(`myProjectStatus-${projectAddress}`);
+            statusElem.textContent = '正在提取退款...';
+            statusElem.className = '';
+            try {
+                const projectContract = new ethers.Contract(projectAddress, projectAbi, signer);
+                const tx = await projectContract.connect(signer).withdrawRefund();
+                await tx.wait();
+                statusElem.textContent = '退款已成功提取！';
+                statusElem.className = 'success';
+                refreshMyProjects();
+                refreshProjectList();
+            } catch (error) {
+                console.error("提取退款失败:", error);
+                statusElem.textContent = `提取退款失败: ${error.message}`;
+                statusElem.className = 'error';
+            }
+        }
+
+
+        // --- 事件监听器 --- 
+        window.addEventListener('load', connectWallet);
+        document.getElementById('requestFundsBtn').addEventListener('click', requestFundsFromFaucet);
+        document.getElementById('submitProposalBtn').addEventListener('click', submitProjectProposal);
+        document.getElementById('refreshProjects').addEventListener('click', refreshProjectList);
+        document.getElementById('refreshMyProjects').addEventListener('click', refreshMyProjects);
+
+    </script>
+</body>
+</html> 
