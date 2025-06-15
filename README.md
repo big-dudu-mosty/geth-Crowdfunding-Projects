@@ -16,8 +16,7 @@ npx hardhat run scripts/deploy.js --network geth
 # 前端
     npx http-server frontend/ -p 8080 --cors
     # 设置权限审批
-     node scripts/setProposalManager.js     
-     $env:ADMIN_PRIVATE_KEY="b3485c49bd73808b310c853e6dccffc56f14ef7b4e032d2c5cb38e88368ae432"      
+     node scripts/setProposalManager.js        
     #  查看项目
     node scripts/checkProposals.js   
 ```
